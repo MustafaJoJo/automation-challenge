@@ -1,0 +1,91 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - openssl
+
+runcmd:
+  - |
+    set -eux
+
+    FQDN="automation-challenge.cgi.com"
+
+    # Docker installieren
+    if ! command -v docker >/dev/null 2>&1; then
+      curl -fsSL https://get.docker.com | sh
+      systemctl enable --now docker
+    fi
+
+    mkdir -p /opt/nginx/html /opt/nginx/certs /opt/nginx/conf
+
+    # "Hello CGI!" Seite
+    cat > /opt/nginx/html/index.html <<'EOF'
+    <!doctype html>
+    <html>
+      <head><title>Hello</title></head>
+      <body style="font-family: sans-serif;">
+        <h1>Hello CGI!</h1>
+      </body>
+    </html>
+    EOF
+
+    # Zertifikat für FQDN (CN + SAN)
+    cat > /opt/nginx/certs/openssl.cnf <<EOF
+    [req]
+    default_bits       = 2048
+    prompt             = no
+    default_md         = sha256
+    req_extensions     = req_ext
+    distinguished_name = dn
+
+    [dn]
+    CN = ${FQDN}
+
+    [req_ext]
+    subjectAltName = @alt_names
+
+    [alt_names]
+    DNS.1 = ${FQDN}
+    EOF
+
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+      -keyout /opt/nginx/certs/tls.key \
+      -out /opt/nginx/certs/tls.crt \
+      -config /opt/nginx/certs/openssl.cnf \
+      -extensions req_ext
+
+    # NGINX Config (HTTP + HTTPS)
+    cat > /opt/nginx/conf/default.conf <<'EOF'
+    server {
+      listen 80;
+      server_name _;
+
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+    }
+
+    server {
+      listen 443 ssl;
+      server_name _;
+
+      ssl_certificate     /etc/nginx/certs/tls.crt;
+      ssl_certificate_key /etc/nginx/certs/tls.key;
+
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+    }
+    EOF
+
+    # NGINX Container starten (80 + 443)
+    docker rm -f nginx-hello || true
+    docker run -d --name nginx-hello --restart unless-stopped \
+      -p 80:80 -p 443:443 \
+      -v /opt/nginx/html:/usr/share/nginx/html:ro \
+      -v /opt/nginx/certs:/etc/nginx/certs:ro \
+      -v /opt/nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro \
+      nginx:stable
